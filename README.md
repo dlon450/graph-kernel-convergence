@@ -1,1 +1,1 @@
-# graph-kernel-convergence
+# Graph Kernel Convergence
