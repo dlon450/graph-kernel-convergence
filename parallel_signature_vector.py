@@ -127,7 +127,7 @@ def _khat_for_rep(n, num_walks, p_term, sigma, gamma, seed):
 import os
 from concurrent.futures import ProcessPoolExecutor
 
-def run_curve_parallel(ns=(5,10,15,20,25),
+def run_curve_parallel(ns=(5,7,9,11,13,15,17,19,21,23,25),
                        num_walks=2000, p_term=0.1,
                        sigma=5.0, gamma=1.,
                        seed=0, reps=100,
@@ -179,7 +179,12 @@ def run_curve_parallel(ns=(5,10,15,20,25),
 
 if __name__ == "__main__":
     Ns, mses_rf, mses_rbf, mses_true_vs_exact_kernel = run_curve_parallel(max_workers=16, reps=128)
-
+    # save mses
+    np.savez("parallel_diffusion_kernel_approximation_results.npz",
+             Ns=Ns,
+             mses_rf=mses_rf,
+             mses_rbf=mses_rbf,
+             mses_true_vs_exact_kernel=mses_true_vs_exact_kernel)
     # plot shaded errorbar
     plt.figure(figsize=(6,4))
     plt.errorbar(Ns, np.mean(mses_rf, axis=0), yerr=np.std(mses_rf, axis=0), marker="o", label="g-GRF (diffusion) vs exact")
