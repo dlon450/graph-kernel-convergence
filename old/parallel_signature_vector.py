@@ -8,29 +8,6 @@ from functools import partial
 def neighbors(r, c, n):
     return [((r-1) % n, c % n), ((r+1) % n, c % n), (r % n, (c-1) % n), (r % n, (c+1) % n)]
 
-# def generate_signature_vector_diffusion_sym(n=10, source=(0,0), num_walks=400, p_term=0.2, gamma=1.0, sigma=1.0, seed=0):
-#     rng = np.random.default_rng(seed)
-#     v = np.zeros((n,n), dtype=np.float64)
-#     rr, cc = source
-#     s = (sigma*sigma)/4.0
-#     for _ in range(num_walks):
-#         r, c = rr, cc
-#         load = 1.0
-#         k = 0
-#         fk = 1.0
-#         while True:
-#             v[r,c] += load*fk
-#             k += 1
-#             nbrs = neighbors(r,c,n); dv = 4
-#             wr, wc = nbrs[rng.integers(dv)]; dw = 4
-#             p = 1.0/dv
-#             u = gamma/np.sqrt(dv*dw)
-#             load *= u/(p*(1.0-p_term))
-#             r, c = wr, wc
-#             fk *= s/k
-#             if rng.random() < p_term: break
-#     return (v/num_walks).reshape(-1)
-
 def generate_signature_vector_diffusion_sym(n=10, source=(0,0), num_walks=400,
                                             p_term=0.2, gamma=1.0, sigma=1.0, seed=0):
     rng = np.random.default_rng(seed)
@@ -129,7 +106,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 def run_curve_parallel(ns=(5,7,9,11,13,15,17,19,21,23,25),
                        num_walks=2000, p_term=0.1,
-                       sigma=5.0, gamma=1.,
+                       sigma=4.0, gamma=1.,
                        seed=0, reps=100,
                        max_workers=None):
     """
