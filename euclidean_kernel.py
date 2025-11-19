@@ -221,8 +221,14 @@ if __name__ == "__main__":
             titles=["Gaussian Kernel", "Signature Vector", "Continuous g", "Inner Products"],
             save_fn=f"diffusion_sym_n{n}_p{p_term}.png"
         )
-        results_dict[(n, p_term)] = mse(K, inner)
+        results_dict[(n, p_term)] = (mse(K, inner), mse(G * constant(2, sigma, n) / (n**2), sv))
     print("MSE Results:")
     for k, v in results_dict.items():
-        print(f"N={k[0]}, p_term={k[1]}: MSE={v:.6e}")
+        print(f"N={k[0]}, p_term={k[1]}: MSE_K_inner={v[0]}, MSE_g_sv={v[1]}")
     pd.DataFrame.from_dict(results_dict, orient='index', columns=['MSE']).to_csv("diffusion_sym_results.csv")
+    # print("Plot MSEs:")
+    # df = pd.DataFrame.from_dict(results_dict, orient='index', columns=['MSE_K_inner', 'MSE_g_sv'])
+    # print(df)
+    # plt.figure(figsize=(8,6))
+    # plt.plot(Ns, df['MSE_K_inner'], marker='o', label='MSE Kernel vs Signature Vector')
+    # plt.plot(Ns, df['MSE_g_sv'], marker='o', label='MSE Continuous g vs Signature Vector')

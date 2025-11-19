@@ -123,8 +123,9 @@ def run_experiment_nd(Ns, p_terms, d, sigma, sv_func, num_walks=1_000_000, pfix=
 
 if __name__ == "__main__":
     Ns = [5, 15, 25]
-    p_terms = [0.01, 0.005, 0.001]
+    p_terms = [0.001, 0.0005, 0.0005]
+    D = 6
     sigma = 0.2
-    run_experiment_nd(Ns, p_terms, d=3, sigma=sigma,
+    run_experiment_nd(Ns, p_terms, d=D, sigma=sigma,
                       sv_func=generate_signature_vector_diffusion_sym_nd,
                       num_walks=1_000_000, seed=346511053, workers=16)

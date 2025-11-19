@@ -11,11 +11,14 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from typing import Dict, List, Tuple, Any
+import numpy as np, torch, matplotlib.pyplot as plt
+from matplotlib.colors import Normalize, TwoSlopeNorm
+from matplotlib.cm import ScalarMappable
 
 # =============== CONFIG ===============
 CFG = dict(
     N=600,                # sphere sample size
-    k=16,                 # kNN
+    k=8,                  # kNN
     num_starts=200,       # number of x_j
     start_mode="farthest",# or "random"
     n_walks=2000,         # by default = N (per start)
@@ -31,7 +34,7 @@ CFG = dict(
     hidden=1024,
     batch_size=1024,
     lr=1e-3,
-    epochs=1000,
+    epochs=500,
     val_frac=0.2,
     torch_seed=0,
 )
@@ -154,9 +157,14 @@ def build_ggrf_signatures_on_sphere(
     else:
         raise ValueError("start_mode must be 'farthest' or 'random'")
 
-    alpha = precompute_alpha(tau, Kmax=10000, eps=1e-300)
+    # AFTER  — use the symmetric modulation f, i.e. α with τ/2
+    f = precompute_alpha(0.5 * tau, Kmax=10000, eps=1e-300)
     def modulation(step: int) -> float:
-        return float(alpha[step]) if step < alpha.shape[0] else 0.0
+        return float(f[step]) if step < f.shape[0] else 0.0
+
+    # alpha = precompute_alpha(tau, Kmax=10000, eps=1e-300)
+    # def modulation(step: int) -> float:
+    #     return float(alpha[step]) if step < alpha.shape[0] else 0.0 
 
     if n_walks is None: n_walks = N
 
@@ -164,7 +172,7 @@ def build_ggrf_signatures_on_sphere(
 
     def sample_feature(start_idx: int):
         vec = np.zeros(N, dtype=float)
-        local_rng = np.random.default_rng(int(seed) * 1009 + int(start_idx))
+        local_rng = np.random.default_rng(346511053)
         while vec.dtype == float:  # silly loop to scope variables (runs once)
             for _ in range(n_walks):
                 u = int(start_idx)
@@ -412,6 +420,89 @@ def main(CFG):
     
     return out, model
 
+def plot_fx_field(model, X, start_indices, phi, j_star=0, title_prefix="",
+                  share_norm=True,  # use same vmin/vmax for pred & truth
+                  cmap_main="OrRd", cmap_err="coolwarm"):
+    """
+    Visualize f(x, ·), φ_t(x)[·], and error with colorbars.
+
+    share_norm=True -> pred & truth use the SAME (vmin, vmax) from unnormalized values.
+    If you want heat-kernel scale instead of φ_t, divide both arrays by exp(t) before plotting.
+    """
+    model.eval()
+    device = next(model.parameters()).device
+    N = X.shape[0]
+    s = int(start_indices[j_star])
+    start_xyz = X[s]
+    omega_xyz = X
+    dots = np.clip((omega_xyz * start_xyz).sum(axis=1), -1.0, 1.0)
+    geod = np.arccos(dots)
+
+    # batch with IDs + continuous feats (works for both model variants)
+    batch = {
+        "start": torch.full((N,), s, dtype=torch.long, device=device),
+        "omega": torch.arange(N, dtype=torch.long, device=device),
+        "start_xyz": torch.tensor(np.repeat(start_xyz[None,:], N, axis=0), dtype=torch.float32, device=device),
+        "omega_xyz": torch.tensor(omega_xyz, dtype=torch.float32, device=device),
+        "geod": torch.tensor(geod[:,None], dtype=torch.float32, device=device),
+    }
+    with torch.no_grad():
+        f_pred = model(batch).detach().cpu().numpy()
+
+    # ground truth row for this start
+    j = int(np.where(start_indices == s)[0][0])
+    phi_row = phi[j].astype(float)
+
+    # ---- normalization choices ----
+    if share_norm:
+        vmin = min(f_pred.min(), phi_row.min())
+        vmax = max(f_pred.max(), phi_row.max())
+        norm_main = Normalize(vmin=vmin, vmax=vmax)
+        f_vis = f_pred
+        g_vis = phi_row
+    else:
+        # independent [0,1] normalization for each
+        def norm01(v): v = v - v.min(); return v / (v.max() + 1e-12)
+        f_vis = norm01(f_pred); g_vis = norm01(phi_row)
+        norm_main = Normalize(vmin=0.0, vmax=1.0)
+
+    err = f_pred - phi_row
+    norm_err = TwoSlopeNorm(vmin=err.min(), vcenter=0.0, vmax=err.max())
+
+    # ---- PRED ----
+    fig1 = plt.figure()
+    ax1 = fig1.add_subplot(111, projection='3d')
+    sc1 = ax1.scatter(X[:,0], X[:,1], X[:,2], s=18, c=f_vis, cmap=cmap_main, norm=norm_main)
+    ax1.set_title(f"{title_prefix} NN prediction f(x, ·)")
+    ax1.set_xticks([]); ax1.set_yticks([]); ax1.set_zticks([]); ax1.set_box_aspect([1,1,1])
+    cbar1 = fig1.colorbar(ScalarMappable(norm=norm_main, cmap=cmap_main), ax=ax1, shrink=0.8)
+    cbar1.set_label("f(x, ω)" + (" (shared scale)" if share_norm else " (individually normalized)"))
+    plt.show()
+
+    # ---- TRUTH ----
+    fig2 = plt.figure()
+    ax2 = fig2.add_subplot(111, projection='3d')
+    sc2 = ax2.scatter(X[:,0], X[:,1], X[:,2], s=18, c=g_vis, cmap=cmap_main, norm=norm_main)
+    ax2.set_title(f"{title_prefix} Ground truth φ_t(x)[·]")
+    ax2.set_xticks([]); ax2.set_yticks([]); ax2.set_zticks([]); ax2.set_box_aspect([1,1,1])
+    cbar2 = fig2.colorbar(ScalarMappable(norm=norm_main, cmap=cmap_main), ax=ax2, shrink=0.8)
+    cbar2.set_label("φ_t(x, ω)" + (" (shared scale)" if share_norm else " (individually normalized)"))
+    plt.show()
+
+    # ---- ERROR ----
+    fig3 = plt.figure()
+    ax3 = fig3.add_subplot(111, projection='3d')
+    sc3 = ax3.scatter(X[:,0], X[:,1], X[:,2], s=18, c=err, cmap=cmap_err, norm=norm_err)
+    ax3.set_title(f"{title_prefix} Error: f(x, ·) − φ_t(x)[·]")
+    ax3.set_xticks([]); ax3.set_yticks([]); ax3.set_zticks([]); ax3.set_box_aspect([1,1,1])
+    cbar3 = fig3.colorbar(ScalarMappable(norm=norm_err, cmap=cmap_err), ax=ax3, shrink=0.8)
+    cbar3.set_label("Prediction − Truth")
+    plt.show()
+
 if __name__ == "__main__":
     out, model = main(CFG)
+    X  = out["X"]
+    phi = out["phi"]
+    start_indices = out["start_indices"]
 
+    plot_fx_field(model, X, start_indices, phi, j_star=0, title_prefix="Start j=0")
