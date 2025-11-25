@@ -34,7 +34,7 @@ CFG = dict(
     hidden=1024,
     batch_size=1024,
     lr=1e-3,
-    epochs=500,
+    epochs=300,
     val_frac=0.2,
     torch_seed=0,
 )
@@ -212,9 +212,7 @@ def build_ggrf_signatures_on_sphere(
 # Supervision: (x_j, ω_{j,i}) -> y_{j,i} = φ_t(x_j)[ω_{j,i}]
 # ----------------------------
 
-def make_node_pair_supervision(out: Dict[str, Any],
-                               mode: str = "all", M_per_start: int | None = None,
-                               seed: int = 123):
+def make_node_pair_supervision(out: Dict[str, Any], mode: str = "all", M_per_start: int | None = None, seed: int = 123):
     """
     Build arrays: start_ids (M,), omega_ids (M,), targets (M,) and geometry arrays.
     If M_per_start is set with mode="random", uniformly subsample that many ω per start x_j.
@@ -231,6 +229,9 @@ def make_node_pair_supervision(out: Dict[str, Any],
         if mode == "random" and (M_per_start is not None) and (M_per_start < N):
             nodes = rng.choice(N, size=M_per_start, replace=False)
         for i in nodes:
+            if phi[j, i] < 0.01:
+                if rng.random() < 0.975:
+                    continue
             starts.append(int(s))
             omegas.append(int(i))
             targets.append(float(phi[j, i]))
@@ -285,44 +286,7 @@ if ensure_torch():
             "geod": torch.tensor([b["geod"] for b in batch], dtype=torch.float32).unsqueeze(-1),
             "target": torch.tensor([b["target"] for b in batch], dtype=torch.float32),
         }
-
-    # class SignatureAtNodeRegressor(nn.Module):
-    #     """
-    #     f(x, ω): default uses ONLY coords + geodesic (continuous RF).
-    #     If use_ids=True, adds ID embeddings for start and omega.
-    #     """
-    #     def __init__(self, num_nodes: int, x_coords: np.ndarray,
-    #                  d_emb: int = 64, hidden: int = 128,
-    #                  use_continuous_only: bool = True):
-    #         super().__init__()
-    #         self.register_buffer("Xcoords", torch.tensor(x_coords, dtype=torch.float32))  # (N,3)
-    #         self.use_cont = use_continuous_only
-    #         self.use_ids = not use_continuous_only
-    #         if self.use_ids:
-    #             self.start_emb = nn.Embedding(num_nodes, d_emb)
-    #             self.omega_emb = nn.Embedding(num_nodes, d_emb)
-
-    #         # inputs: geod (1), start_xyz (3), omega_xyz (3) -> 7 dims
-    #         in_dim = 7
-    #         if self.use_ids:
-    #             in_dim += 2 * d_emb
-
-    #         self.mlp = nn.Sequential(
-    #             nn.Linear(in_dim, hidden), nn.ReLU(),
-    #             nn.Linear(hidden, hidden*2), nn.ReLU(),
-    #             nn.Linear(hidden*2, hidden), nn.ReLU(),
-    #             nn.Linear(hidden, 1)
-    #         )
-
-    #     def forward(self, batch):
-    #         s = batch["start"]; o = batch["omega"]; geod = batch["geod"]
-    #         pieces = [batch["start_xyz"], batch["omega_xyz"], geod]
-    #         if self.use_ids:
-    #             s_emb = self.start_emb(s); o_emb = self.omega_emb(o)
-    #             pieces = [s_emb, o_emb] + pieces
-    #         x = torch.cat(pieces, dim=-1)
-    #         return self.mlp(x).squeeze(-1)
-
+    
     # ----------------------------
     # Training utilities
     # ----------------------------
@@ -333,6 +297,19 @@ if ensure_torch():
         k = int(M * (1 - val_frac))
         return idx[:k], idx[k:]
 
+    def split_by_start(starts_all: np.ndarray, val_frac: float = 0.2, seed: int = 0):
+        rng = np.random.default_rng(seed)
+        unique = np.unique(starts_all)
+        rng.shuffle(unique)
+        m_val = max(1, int(round(len(unique) * val_frac)))
+        val_starts = np.sort(unique[:m_val])
+        train_starts = np.sort(unique[m_val:])
+        train_mask = np.isin(starts_all, train_starts)
+        val_mask   = np.isin(starts_all, val_starts)
+        train_idx = np.nonzero(train_mask)[0]
+        val_idx   = np.nonzero(val_mask)[0]
+        return train_idx, val_idx, train_starts, val_starts
+
     def train_model_node_pairs(
         sup: Dict[str, Any],
         batch_size=1024, epochs=8, lr=1e-3,
@@ -340,7 +317,8 @@ if ensure_torch():
     ):
         import torch
         ds = NodePairDataset(sup, use_continuous_only=use_continuous_only)
-        train_idx, val_idx = split_indices(len(ds), val_frac=val_frac, seed=seed)
+        # train_idx, val_idx = split_indices(len(ds), val_frac=val_frac, seed=seed)
+        train_idx, val_idx, train_starts, val_starts = split_by_start(sup["starts"], val_frac=val_frac, seed=seed)
 
         class Subset(torch.utils.data.Dataset):
             def __init__(self, base, idxs): self.base, self.idxs = base, idxs
@@ -381,128 +359,140 @@ if ensure_torch():
             print(f"Epoch {ep:02d} | RMSE train: {rmse_tr:.6f} | RMSE val: {rmse_va:.6f}")
         return model
 
-# ----------------------------
-# Main: build data → train NN
-# ----------------------------
+    class NodePairDatasetWithGeod(NodePairDataset):
+        def __init__(self, sup: Dict[str, Any], geod_matrix: np.ndarray, use_continuous_only: bool = True):
+            super().__init__(sup, use_continuous_only=use_continuous_only)
+            # geod_matrix can be full N x N, or rows only for the starts (pass an indexer to map)
+            self.G = geod_matrix  # shape (N, N) OR (num_starts, N) if you index by start position
+            self.map_from_start_to_row = None  # filled if G is subset
+
+        def set_row_indexer(self, start_indices: np.ndarray):
+            """Optional: if G has rows only for specific start nodes in 'start_indices' (validation/train starts),
+               set this so we can pick correct geodesic rows quickly."""
+            pos = {int(s): i for i, s in enumerate(start_indices)}
+            self.map_from_start_to_row = pos
+
+        def __getitem__(self, idx):
+            ex = super().__getitem__(idx)
+            s = int(ex["start"]); o = int(ex["omega"])
+            if self.map_from_start_to_row is None:
+                geod_val = float(self.G[s, o])
+            else:
+                geod_val = float(self.G[self.map_from_start_to_row[s], o])
+            ex["geod"] = geod_val
+            return ex
+
+    def train_model_node_pairs_by_start(
+        sup: Dict[str, Any], geod_matrix: np.ndarray,
+        batch_size=1024, epochs=8, lr=1e-3,
+        d_emb=64, hidden=128, use_continuous_only=True,
+        val_frac=0.2, seed=0, val_start_ids: np.ndarray | None = None
+    ):
+        import torch
+        ds = NodePairDatasetWithGeod(sup, geod_matrix, use_continuous_only=use_continuous_only)
+
+        if val_start_ids is None:
+            tr_idx, va_idx, tr_starts, va_starts = split_by_start(sup["starts"], val_frac=val_frac, seed=seed)
+        else:
+            # user-specified validation starts
+            all_starts = np.unique(sup["starts"])
+            tr_starts = np.setdiff1d(all_starts, val_start_ids)
+            va_starts = np.array(sorted(np.unique(val_start_ids)))
+            tr_idx = np.nonzero(np.isin(sup["starts"], tr_starts))[0]
+            va_idx = np.nonzero(np.isin(sup["starts"], va_starts))[0]
+
+        class Subset(torch.utils.data.Dataset):
+            def __init__(self, base, idxs): self.base, self.idxs = base, idxs
+            def __len__(self): return len(self.idxs)
+            def __getitem__(self, i): return self.base[self.idxs[i]]
+
+        tr_ds, va_ds = Subset(ds, tr_idx), Subset(ds, va_idx)
+        tr = torch.utils.data.DataLoader(tr_ds, batch_size=batch_size, shuffle=True, collate_fn=collate, drop_last=False)
+        va = torch.utils.data.DataLoader(va_ds, batch_size=batch_size, shuffle=False, collate_fn=collate, drop_last=False)
+
+        model = SignatureAtNodeRegressor(
+            num_nodes=sup["N"], x_coords=sup["X"],
+            d_emb=d_emb, hidden=hidden, use_continuous_only=use_continuous_only
+        )
+        torch.manual_seed(seed)
+        opt = torch.optim.Adam(model.parameters(), lr=lr)
+        loss_fn = torch.nn.MSELoss()
+
+        def eval_loader(dl):
+            model.eval()
+            se, n = 0.0, 0
+            with torch.no_grad():
+                for batch in dl:
+                    pred = model(batch); y = batch["target"]
+                    se += torch.sum((pred - y)**2).item()
+                    n += y.numel()
+            return math.sqrt(se / n)
+
+        hist = {"rmse_train": [], "rmse_val": []}
+        for ep in range(1, epochs+1):
+            model.train()
+            for batch in tr:
+                pred = model(batch); y = batch["target"]
+                loss = loss_fn(pred, y)
+                opt.zero_grad(); loss.backward(); opt.step()
+            rmse_tr = eval_loader(tr)
+            rmse_va = eval_loader(va)
+            hist["rmse_train"].append(rmse_tr)
+            hist["rmse_val"].append(rmse_va)
+            print(f"Epoch {ep:02d} | RMSE train: {rmse_tr:.6f} | RMSE val: {rmse_va:.6f}")
+
+        return model, hist, {"train_starts": tr_starts, "val_starts": va_starts,
+                             "train_idx": tr_idx, "val_idx": va_idx}
+
+def plot_dynamics(hist, title="Training/Validation RMSE"):
+    import matplotlib.pyplot as plt
+    xs = np.arange(1, len(hist["rmse_train"])+1)
+    plt.figure()
+    plt.plot(xs, hist["rmse_train"], label="train")
+    plt.plot(xs, hist["rmse_val"],   label="val")
+    plt.xlabel("epoch"); plt.ylabel("RMSE"); plt.title(title)
+    plt.legend(); plt.show()
+
+def geodesic_matrix_sphere(X: np.ndarray) -> np.ndarray:
+    """Exact spherical geodesic on S^2 via arccos of dot product."""
+    dots = np.clip(X @ X.T, -1.0, 1.0)
+    return np.arccos(dots)
 
 def main(CFG):
-    N, k = CFG["N"], CFG["k"]
-    num_starts, start_mode = CFG["num_starts"], CFG["start_mode"]
-    n_walks, phalt, t, seed = CFG["n_walks"], CFG["phalt"], CFG["t"], CFG["seed"]
-
+    # Build signatures on S^2 (your code does this already)
     out = build_ggrf_signatures_on_sphere(
-        N=N, k=k, num_starts=num_starts, start_mode=start_mode,
-        n_walks=n_walks, phalt=phalt, tau=t, seed=seed
+        N=CFG["N"], k=CFG["k"], num_starts=CFG["num_starts"],
+        start_mode=CFG["start_mode"], n_walks=CFG["n_walks"],
+        phalt=CFG["phalt"], tau=CFG["t"], seed=CFG["seed"]
     )
-    print("Built signatures:", {k: out["params"][k] for k in ["N","k","num_starts","n_walks","phalt","tau"]})
+    X, phi, start_indices = out["X"], out["phi"], out["start_indices"]
 
+    # Supervision (all ω per start or subsample)
     sup = make_node_pair_supervision(
         out,
         mode=("all" if CFG["subsample_per_start"] is None else "random"),
         M_per_start=CFG["subsample_per_start"],
         seed=123
     )
-    sup["N"] = out["params"]["N"]  # add for model ctor
-    print("Dataset size:", len(sup["targets"]))
+    sup["N"] = out["params"]["N"]
 
-    if ensure_torch():
-        model = train_model_node_pairs(
-            sup,
-            batch_size=CFG["batch_size"],
-            epochs=CFG["epochs"],
-            lr=CFG["lr"],
-            d_emb=CFG["d_emb"],
-            hidden=CFG["hidden"],
-            use_continuous_only=CFG["use_continuous_only"],
-            val_frac=CFG["val_frac"],
-            seed=CFG["torch_seed"]
-        )
-    
-    return out, model
+    # Geodesics on the sphere
+    G_sphere = geodesic_matrix_sphere(X)  # N x N
 
-def plot_fx_field(model, X, start_indices, phi, j_star=0, title_prefix="",
-                  share_norm=True,  # use same vmin/vmax for pred & truth
-                  cmap_main="OrRd", cmap_err="coolwarm"):
-    """
-    Visualize f(x, ·), φ_t(x)[·], and error with colorbars.
+    # Train with start-wise holdout (so any visualized row is validation-only)
+    model_sphere, hist_sphere, splits_sphere = train_model_node_pairs_by_start(
+        sup, G_sphere,
+        batch_size=CFG["batch_size"], epochs=CFG["epochs"], lr=CFG["lr"],
+        d_emb=CFG["d_emb"], hidden=CFG["hidden"], use_continuous_only=CFG["use_continuous_only"],
+        val_frac=CFG["val_frac"], seed=CFG["torch_seed"]
+    )
 
-    share_norm=True -> pred & truth use the SAME (vmin, vmax) from unnormalized values.
-    If you want heat-kernel scale instead of φ_t, divide both arrays by exp(t) before plotting.
-    """
-    model.eval()
-    device = next(model.parameters()).device
-    N = X.shape[0]
-    s = int(start_indices[j_star])
-    start_xyz = X[s]
-    omega_xyz = X
-    dots = np.clip((omega_xyz * start_xyz).sum(axis=1), -1.0, 1.0)
-    geod = np.arccos(dots)
+    plot_dynamics(hist_sphere, title="Sphere: RMSE")
 
-    # batch with IDs + continuous feats (works for both model variants)
-    batch = {
-        "start": torch.full((N,), s, dtype=torch.long, device=device),
-        "omega": torch.arange(N, dtype=torch.long, device=device),
-        "start_xyz": torch.tensor(np.repeat(start_xyz[None,:], N, axis=0), dtype=torch.float32, device=device),
-        "omega_xyz": torch.tensor(omega_xyz, dtype=torch.float32, device=device),
-        "geod": torch.tensor(geod[:,None], dtype=torch.float32, device=device),
-    }
-    with torch.no_grad():
-        f_pred = model(batch).detach().cpu().numpy()
-
-    # ground truth row for this start
-    j = int(np.where(start_indices == s)[0][0])
-    phi_row = phi[j].astype(float)
-
-    # ---- normalization choices ----
-    if share_norm:
-        vmin = min(f_pred.min(), phi_row.min())
-        vmax = max(f_pred.max(), phi_row.max())
-        norm_main = Normalize(vmin=vmin, vmax=vmax)
-        f_vis = f_pred
-        g_vis = phi_row
-    else:
-        # independent [0,1] normalization for each
-        def norm01(v): v = v - v.min(); return v / (v.max() + 1e-12)
-        f_vis = norm01(f_pred); g_vis = norm01(phi_row)
-        norm_main = Normalize(vmin=0.0, vmax=1.0)
-
-    err = f_pred - phi_row
-    norm_err = TwoSlopeNorm(vmin=err.min(), vcenter=0.0, vmax=err.max())
-
-    # ---- PRED ----
-    fig1 = plt.figure()
-    ax1 = fig1.add_subplot(111, projection='3d')
-    sc1 = ax1.scatter(X[:,0], X[:,1], X[:,2], s=18, c=f_vis, cmap=cmap_main, norm=norm_main)
-    ax1.set_title(f"{title_prefix} NN prediction f(x, ·)")
-    ax1.set_xticks([]); ax1.set_yticks([]); ax1.set_zticks([]); ax1.set_box_aspect([1,1,1])
-    cbar1 = fig1.colorbar(ScalarMappable(norm=norm_main, cmap=cmap_main), ax=ax1, shrink=0.8)
-    cbar1.set_label("f(x, ω)" + (" (shared scale)" if share_norm else " (individually normalized)"))
-    plt.show()
-
-    # ---- TRUTH ----
-    fig2 = plt.figure()
-    ax2 = fig2.add_subplot(111, projection='3d')
-    sc2 = ax2.scatter(X[:,0], X[:,1], X[:,2], s=18, c=g_vis, cmap=cmap_main, norm=norm_main)
-    ax2.set_title(f"{title_prefix} Ground truth φ_t(x)[·]")
-    ax2.set_xticks([]); ax2.set_yticks([]); ax2.set_zticks([]); ax2.set_box_aspect([1,1,1])
-    cbar2 = fig2.colorbar(ScalarMappable(norm=norm_main, cmap=cmap_main), ax=ax2, shrink=0.8)
-    cbar2.set_label("φ_t(x, ω)" + (" (shared scale)" if share_norm else " (individually normalized)"))
-    plt.show()
-
-    # ---- ERROR ----
-    fig3 = plt.figure()
-    ax3 = fig3.add_subplot(111, projection='3d')
-    sc3 = ax3.scatter(X[:,0], X[:,1], X[:,2], s=18, c=err, cmap=cmap_err, norm=norm_err)
-    ax3.set_title(f"{title_prefix} Error: f(x, ·) − φ_t(x)[·]")
-    ax3.set_xticks([]); ax3.set_yticks([]); ax3.set_zticks([]); ax3.set_box_aspect([1,1,1])
-    cbar3 = fig3.colorbar(ScalarMappable(norm=norm_err, cmap=cmap_err), ax=ax3, shrink=0.8)
-    cbar3.set_label("Prediction − Truth")
-    plt.show()
+    return out, model_sphere
 
 if __name__ == "__main__":
     out, model = main(CFG)
     X  = out["X"]
     phi = out["phi"]
     start_indices = out["start_indices"]
-
-    plot_fx_field(model, X, start_indices, phi, j_star=0, title_prefix="Start j=0")

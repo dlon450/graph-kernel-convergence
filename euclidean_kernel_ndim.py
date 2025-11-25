@@ -83,22 +83,26 @@ def inner_autocorr_nd(sv):
     return np.roll(inner, sh, axis=tuple(range(sv.ndim)))
 
 def standard_gaussian_kernel_nd(n, d, sigma=0.1, center=None):
-    if center is None: center = (0.5,)*d
+    if center is None: 
+        center = (0.5,)*d
     axes = [np.linspace(0.0, 1.0, n) for _ in range(d)]
     grids = np.meshgrid(*axes, indexing='ij')
     r2 = 0
-    for i, G in enumerate(grids): r2 += (G - center[i])**2
+    for i, G in enumerate(grids): 
+        r2 += (G - center[i])**2
     return np.exp(-r2/(2*sigma**2)), axes
 
 def g_nd(n, d, sigma=0.1, center=None, images=1):
-    if center is None: center = (0.5,)*d
+    if center is None: 
+        center = (0.5,)*d
     axes = [np.linspace(0.0, 1.0, n) for _ in range(d)]
     grids = np.meshgrid(*axes, indexing='ij')
     S = np.zeros((n,)*d)
     rng = range(-images, images+1)
     for sh in product(rng, repeat=d):
         r2 = 0
-        for i, G in enumerate(grids): r2 += (G - center[i] - sh[i])**2
+        for i, G in enumerate(grids): 
+            r2 += (G - center[i] - sh[i])**2
         S += np.exp(-r2/(sigma**2))
     return S / ((np.pi*sigma**2)**(d/2)), axes
 
@@ -111,21 +115,21 @@ def run_experiment_nd(Ns, p_terms, d, sigma, sv_func, num_walks=1_000_000, pfix=
         K, _ = standard_gaussian_kernel_nd(n, d, sigma, center)
         sv = sv_func(
             n=n, d=d, source=tuple([n//2]*d), num_walks=num_walks, p_term=p_term, sigma=sigma, seed=seed, workers=workers
-            ).reshape((n,)*d) * constant(d, sigma, n)
+            ).reshape((n,)*d) * constant(d, sigma, n) * (n**(d/2.))
         F = np.fft.fftn(sv); inner = np.fft.ifftn(np.abs(F)**2).real
         inner = np.roll(inner, tuple([-n//2]*d), axis=tuple(range(d)))
         G, _ = g_nd(n, d, sigma, center)
-        res[(n, p_term)] = {'mse_K_inner': mse(K, inner), 'mse_g_sv': mse(G * constant(d, sigma, n) / (n**d), sv)}
+        res[(n, p_term)] = {'mse_K_inner': mse(K, inner), 'mse_g_sv': mse(G * (2*np.pi*sigma**2)**(d/4.), sv)}
     df = pd.DataFrame.from_dict(res, orient='index')
     print(df)
     if csv_fn: df.to_csv(csv_fn)
     return df
 
 if __name__ == "__main__":
-    Ns = [5, 15, 25]
-    p_terms = [0.001, 0.0005, 0.0005]
-    D = 6
+    Ns = [5, 15, 25, 35, 45, 55, 65, 75, 85, 95, 105, 115, 125]
+    p_terms = [0.1, 0.05, 0.01, 0.01, 0.01, 0.01, 0.005, 0.005, 0.005, 0.005, 0.001, 0.001, 0.001]
+    D = 2
     sigma = 0.2
     run_experiment_nd(Ns, p_terms, d=D, sigma=sigma,
                       sv_func=generate_signature_vector_diffusion_sym_nd,
-                      num_walks=1_000_000, seed=346511053, workers=16)
+                      num_walks=1_000_000, seed=346511053, workers=16, csv_fn=f"diffusion_sym_d{D}")

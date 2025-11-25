@@ -74,7 +74,7 @@ def _simulate_walks_chunk(n, rr, cc, chunk_walks, p_term, sigma, seed):
     rng = np.random.default_rng(seed)
     v_local = np.zeros((n, n), dtype=np.float64)
     s = (sigma * sigma) / 2. # same as your code
-    beta = 2. * n * n * s  # resolution-aware scale β(n)=n^2/2
+    beta = 2 * 2. * n * n * s  # resolution-aware scale β(n)=n^2/2
 
     for _ in range(chunk_walks):
         r, c = rr, cc
@@ -202,7 +202,7 @@ if __name__ == "__main__":
             n=n, source=(n//2, n//2), num_walks=1000000,
             p_term=p_term, sigma=sigma, seed=346511053,
             workers=16, show_progress=True
-        ).reshape(n, n) * constant(2, sigma, n)
+        ).reshape(n, n) * constant(2, sigma, n) * (n)
         # plot_values(sv)
 
         # sv_at = lambda r,c: np.roll(sv, (r - n//2, c - n//2), axis=(0,1))
@@ -215,13 +215,13 @@ if __name__ == "__main__":
         G, _ = g_nd(n, 2, sigma, center)
 
         plot_multiple_values(
-            [K, sv, G * constant(2, sigma, n) / (n**2), inner],
+            [K, sv, G * (2 * np.pi * sigma**2)**(2 / 4.), inner],
             xticks=xticks,
             yticks=yticks,
             titles=["Gaussian Kernel", "Signature Vector", "Continuous g", "Inner Products"],
             save_fn=f"diffusion_sym_n{n}_p{p_term}.png"
         )
-        results_dict[(n, p_term)] = (mse(K, inner), mse(G * constant(2, sigma, n) / (n**2), sv))
+        results_dict[(n, p_term)] = (mse(K, inner), mse(G * (2 * np.pi * sigma**2)**(2 / 4.), sv)) # G = S / ((np.pi*sigma**2)**(d/2)),
     print("MSE Results:")
     for k, v in results_dict.items():
         print(f"N={k[0]}, p_term={k[1]}: MSE_K_inner={v[0]}, MSE_g_sv={v[1]}")
