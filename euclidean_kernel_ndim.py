@@ -2,11 +2,10 @@ import numpy as np
 from itertools import product
 import pandas as pd
 from tqdm.auto import tqdm
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
-
-def constant(d, sigma, n):
-    return (2*np.pi*sigma**2)**(d/4.) * (n**(d/2.))
+import pickle
 
 def _simulate_walks_chunk_nd(n, d, start, chunk_walks, p_term, sigma, seed):
     rng = np.random.default_rng(seed)
@@ -109,27 +108,29 @@ def g_nd(n, d, sigma=0.1, center=None, images=1):
 def run_experiment_nd(Ns, p_terms, d, sigma, sv_func, num_walks=1_000_000, pfix=None, seed=0, workers=1, center=None, csv_fn=None):
     if center is None: center = (0.5,)*d
     mse = lambda a,b: np.mean((a-b)**2)
-    constant = lambda d,sigma,n: (2*np.pi*sigma**2)**(d/4.0) * (n**(d/2.0))
-    res = {}
+    constant = lambda d,sigma,n: (2*np.pi*sigma**2)**(d/4.0) * (n**(d))
+    res = defaultdict(list)
     for n, p_term in zip(Ns, p_terms):
         K, _ = standard_gaussian_kernel_nd(n, d, sigma, center)
         sv = sv_func(
             n=n, d=d, source=tuple([n//2]*d), num_walks=num_walks, p_term=p_term, sigma=sigma, seed=seed, workers=workers
-            ).reshape((n,)*d) * constant(d, sigma, n) * (n**(d/2.))
-        F = np.fft.fftn(sv); inner = np.fft.ifftn(np.abs(F)**2).real
-        inner = np.roll(inner, tuple([-n//2]*d), axis=tuple(range(d)))
+            ).reshape((n,)*d) * constant(d, sigma, n)
+        F = np.fft.fftn(sv); inner = np.fft.ifftn(np.abs(F)**2).real 
+        inner = np.roll(inner, tuple([-n//2]*d), axis=tuple(range(d))) / (n**d)
         G, _ = g_nd(n, d, sigma, center)
-        res[(n, p_term)] = {'mse_K_inner': mse(K, inner), 'mse_g_sv': mse(G * (2*np.pi*sigma**2)**(d/4.), sv)}
+        res[(n, p_term)].append({'mse_K_inner': mse(K, inner), 'mse_g_sv': mse(G * (2*np.pi*sigma**2)**(d/4.), sv)})
+    with open("experiment_ndim_result.pkl", "wb") as f:
+        pickle.dump(res, f)
     df = pd.DataFrame.from_dict(res, orient='index')
     print(df)
     if csv_fn: df.to_csv(csv_fn)
     return df
 
 if __name__ == "__main__":
-    Ns = [5, 15, 25, 35, 45, 55, 65, 75, 85, 95, 105, 115, 125]
-    p_terms = [0.1, 0.05, 0.01, 0.01, 0.01, 0.01, 0.005, 0.005, 0.005, 0.005, 0.001, 0.001, 0.001]
+    Ns = [5] * 3
+    p_terms = [0.1] * 3
     D = 2
     sigma = 0.2
     run_experiment_nd(Ns, p_terms, d=D, sigma=sigma,
                       sv_func=generate_signature_vector_diffusion_sym_nd,
-                      num_walks=1_000_000, seed=346511053, workers=16, csv_fn=f"diffusion_sym_d{D}")
+                      num_walks=1_000_000, seed=346511053, workers=16, csv_fn=f"diffusion_sym_d{D}.csv")

@@ -25,7 +25,8 @@ def g_nd(n, d, sigma=0.1, center=None, images=1):
     rng = range(-images, images+1)
     for sh in product(rng, repeat=d):
         r2 = 0
-        for i, G in enumerate(grids): r2 += (G - center[i] - sh[i])**2
+        for i, G in enumerate(grids): 
+            r2 += (G - center[i] - sh[i])**2
         S += np.exp(-r2/(sigma**2))
     return S / ((np.pi*sigma**2)**(d/2)), axes
 
@@ -74,7 +75,7 @@ def _simulate_walks_chunk(n, rr, cc, chunk_walks, p_term, sigma, seed):
     rng = np.random.default_rng(seed)
     v_local = np.zeros((n, n), dtype=np.float64)
     s = (sigma * sigma) / 2. # same as your code
-    beta = 2 * 2. * n * n * s  # resolution-aware scale β(n)=n^2/2
+    beta = 2. * n * n * s  # resolution-aware scale β(n)=n^2/2
 
     for _ in range(chunk_walks):
         r, c = rr, cc
@@ -183,7 +184,7 @@ def mse(a, b):
     return np.mean((a - b)**2)
 
 def constant(d, sigma, n):
-    return (2 * np.pi * sigma**2)**(d / 4.) *  (n**(d / 2.))
+    return (2 * np.pi * sigma**2)**(d / 4.) * (n**(d))
 
 if __name__ == "__main__":
     Ns = [5, 15, 25, 35, 45, 55, 65, 75, 85, 95, 105, 115, 125]
@@ -202,13 +203,13 @@ if __name__ == "__main__":
             n=n, source=(n//2, n//2), num_walks=1000000,
             p_term=p_term, sigma=sigma, seed=346511053,
             workers=16, show_progress=True
-        ).reshape(n, n) * constant(2, sigma, n) * (n)
+        ).reshape(n, n) * constant(2, sigma, n) # * (n**(2/2.))
         # plot_values(sv)
 
         # sv_at = lambda r,c: np.roll(sv, (r - n//2, c - n//2), axis=(0,1))
         # inner = np.array([(sv_at(r,c) * sv).sum() for r in range(n) for c in range(n)]).reshape(n,n)
-        inner = np.fft.ifft2(np.abs(np.fft.fft2(sv))**2).real
-        inner = np.roll(inner, (-n//2, -n//2), axis=(0,1))
+        inner = np.fft.ifft2(np.abs(np.fft.fft2(sv))**2).real 
+        inner = np.roll(inner, (-n//2, -n//2), axis=(0,1)) / (n*n)
         # inner /= inner[n//2,n//2]
         # plot_values(inner)
 
@@ -222,13 +223,20 @@ if __name__ == "__main__":
             save_fn=f"diffusion_sym_n{n}_p{p_term}.png"
         )
         results_dict[(n, p_term)] = (mse(K, inner), mse(G * (2 * np.pi * sigma**2)**(2 / 4.), sv)) # G = S / ((np.pi*sigma**2)**(d/2)),
-    print("MSE Results:")
-    for k, v in results_dict.items():
-        print(f"N={k[0]}, p_term={k[1]}: MSE_K_inner={v[0]}, MSE_g_sv={v[1]}")
-    pd.DataFrame.from_dict(results_dict, orient='index', columns=['MSE']).to_csv("diffusion_sym_results.csv")
-    # print("Plot MSEs:")
-    # df = pd.DataFrame.from_dict(results_dict, orient='index', columns=['MSE_K_inner', 'MSE_g_sv'])
-    # print(df)
-    # plt.figure(figsize=(8,6))
-    # plt.plot(Ns, df['MSE_K_inner'], marker='o', label='MSE Kernel vs Signature Vector')
-    # plt.plot(Ns, df['MSE_g_sv'], marker='o', label='MSE Continuous g vs Signature Vector')
+    # print("MSE Results:")
+    # for k, v in results_dict.items():
+    #     print(f"N={k[0]}, p_term={k[1]}: MSE_K_inner={v[0]}, MSE_g_sv={v[1]}")
+    # pd.DataFrame.from_dict(results_dict, orient='index', columns=['MSE']).to_csv("diffusion_sym_results.csv")
+    print("Plot MSEs:")
+    df = pd.DataFrame.from_dict(results_dict, orient='index', columns=['MSE_K_inner', 'MSE_g_sv'])
+    print(df)
+    df.to_csv("diffusion_sym_results.csv")
+    plt.figure(figsize=(8,6))
+    plt.plot(Ns, df['MSE_K_inner'], marker='o', label='MSE Kernel vs Signature Vector')
+    plt.plot(Ns, df['MSE_g_sv'], marker='o', label='MSE Continuous g vs Signature Vector')
+    plt.title("MSE Comparison vs Grid Size N")
+    plt.xlabel("Grid Size N")
+    plt.ylabel("Mean Squared Error (MSE)")
+    plt.legend()
+    plt.savefig("diffusion_sym_mse_plot.png")
+    plt.show()
