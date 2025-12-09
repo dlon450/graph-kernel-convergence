@@ -356,9 +356,9 @@ def plot_kernel_row_for_start(
 
     err = nn_row - gt_row
     norm_err = TwoSlopeNorm(
-        vmin=float(err.min()),
+        vmin=float(min(err.min(), -err.max())),
         vcenter=0.0,
-        vmax=float(err.max()),
+        vmax=float(max(err.max(), -err.min())),
     )
 
     # ---- NN kernel row ----

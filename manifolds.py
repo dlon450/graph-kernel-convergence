@@ -705,6 +705,7 @@ def compute_nn_kernel_and_errors(
     Returns (K_nn_all, K_true, G_nn, mse, abs_rel_err).
     """
     G_nn = compute_nn_feature_matrix_on_sphere(model, X)     # (N, N)
+    # G_nn /= np.max(G_nn, axis=1)[:, np.newaxis]
     K_nn_all = G_nn @ G_nn.T                                 # (N, N)
 
     K_true = ground_truth_heat_kernel(X, t=t, L_max=L_max)   # (N, N)
@@ -751,22 +752,12 @@ class Manifold:
         """Return an (N, d) array of coordinates for the discretized manifold."""
         raise NotImplementedError
 
-    def build_signature_walks(self, existing_file=None) -> Dict[str, Any]:
+    def build_signature_walks(self) -> Dict[str, Any]:
         """
         Discretize the manifold and build g-GRF signatures φ_t(x_j).
 
         Stores X, start_indices, phi, Wf, neighbors on the instance.
-        """
-        if existing_file:
-            with open(existing_file, "rb") as f:
-                out = pickle.load(f)
-            self.X = out["X"]
-            self.start_indices = out["start_indices"]
-            self.phi = out["phi"] 
-            self.Wf = out["Wf"] # not needed for sphere
-            self.neighbors = out["neighbors"] # not needed for sphere
-            return out
-        
+        """      
         X = self.discretization()
         out = build_signatures_from_coords(
             X=X,
@@ -892,8 +883,20 @@ class Manifold:
 
     def save_pickle(self, path: str) -> None:
         """Save the manifold instance (including trained model) to a file."""
-        with open(path, "wb") as f:
-            pickle.dump(self, f)
+        try:
+            with open(path, "wb") as f:
+                pickle.dump(self, f)
+        except FileNotFoundError as e:
+            raise RuntimeError(f"Could not save to path: {path}") from e
+    
+    def load_pickle(self, path: str) -> None:
+        """Load the manifold instance (including trained model) from a file."""
+        try:
+            with open(path, "rb") as f:
+                obj = pickle.load(f)
+            self.__dict__.update(obj.__dict__)
+        except FileNotFoundError as e:
+            raise RuntimeError(f"Could not load from path: {path}") from e
 
 
 class Ellipsoid(Manifold):
@@ -929,7 +932,7 @@ class Sphere(Ellipsoid):
             raise RuntimeError("Need discretization (build_signature_walks) before geodesics.")
         return geodesic_matrix_sphere(self.X)
 
-    def compute_ground_truth(self, L_max: int):
+    def compute_ground_truth(self, L_max: int, t: Optional[float] = None):
         """
         Compute NN-based kernel from the trained model and compare against
         the ground-truth heat kernel on S^2.
@@ -938,10 +941,11 @@ class Sphere(Ellipsoid):
         """
         if self.model is None or self.X is None:
             raise RuntimeError("Need trained model and discretization before computing ground truth.")
-
+        if not t:
+            t = self.cfg.t
         return compute_nn_kernel_and_errors(
             self.model,
             self.X,
-            t=self.cfg.t,
+            t=t,
             L_max=L_max,
         )
