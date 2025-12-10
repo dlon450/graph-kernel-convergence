@@ -19,13 +19,12 @@ if os.path.exists(filepath):
     model, hist, splits = M.model, M.history, M.splits
 else:
     M.build_signature_walks()
-    M.make_dataset()
-    M.save_pickle(filepath)
-    model, hist, splits = M.train_model()
-    M.save_pickle(filepath)
-K_nn, K_true, G_nn, mse, rel = M.compute_ground_truth(L_max=30, t=0.05 / 2)
+    # M.make_dataset()
+# model, hist, splits = M.train_model()
+# M.save_pickle("saved/sphere_manifold_MSE.pkl")
+K_nn, K_true, G_nn, mse, rel = M.compute_ground_truth(L_max=100, t=0.025)
 
-# Collect validation predictions
+# # Collect validation predictions
 # y_true_va, y_pred_va = M.collect_val_predictions()
 # plot_dynamics(hist, title="Sphere: RMSE", rmse=True)
 # plot_dynamics(hist, title="Sphere: Relative error", rmse=False)
@@ -33,7 +32,7 @@ K_nn, K_true, G_nn, mse, rel = M.compute_ground_truth(L_max=30, t=0.05 / 2)
 # plot_error_vs_truth(y_true_va, y_pred_va, error_type="relative")
 # plot_error_vs_truth(y_true_va, y_pred_va, error_type="squared")
 
-# f(x, ω) on the manifold for a few validation starts
+# # f(x, ω) on the manifold for a few validation starts
 # visualize_several_validation_starts(model,
 #     M.X,                 # N x 3
 #     M.start_indices,     # num_starts
@@ -46,12 +45,10 @@ K_nn, K_true, G_nn, mse, rel = M.compute_ground_truth(L_max=30, t=0.05 / 2)
 
 # Kernel row plots (NN vs ground truth heat kernel)
 example_start = int(splits["val_starts"][0])
-K_nn_scaled = K_nn * 4 * 3.141592653589793 / 4000
 plot_kernel_row_for_start(
     M.X,
     K_true / K_true.max(),
-    K_nn_scaled / K_nn_scaled.max(),
+    K_nn / K_nn.max(),
     start_idx=example_start,
     title_prefix="Heat kernel",
 )
-

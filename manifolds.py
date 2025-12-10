@@ -62,6 +62,47 @@ def fibonacci_sphere_scaled(n: int, a: float = 1.0, b: float = 1.0, c: float = 1
     return S * np.array([a, b, c], dtype=float)[None, :]
 
 
+def torus_grid(N: int, R: float, r: float) -> np.ndarray:
+    """Uniform grid sampling of a torus in R^3."""
+    n_side = int(np.ceil(np.sqrt(N)))
+    theta = np.linspace(0, 2 * np.pi, n_side, endpoint=False)
+    phi = np.linspace(0, 2 * np.pi, n_side, endpoint=False)
+    Theta, Phi = np.meshgrid(theta, phi)
+    Theta = Theta.flatten()[:N]
+    Phi = Phi.flatten()[:N]
+    x = (R + r * np.cos(Phi)) * np.cos(Theta)
+    y = (R + r * np.cos(Phi)) * np.sin(Theta)
+    z = r * np.sin(Phi)
+    return np.stack([x, y, z], axis=1)
+
+
+def mobius_strip_grid(N: int, width: float) -> np.ndarray:
+    """Uniform grid sampling of a Möbius strip in R^3."""
+    n_side = int(np.ceil(np.sqrt(N)))
+    u = np.linspace(0, 2 * np.pi, n_side, endpoint=False)
+    v = np.linspace(-width / 2, width / 2, n_side)
+    U, V = np.meshgrid(u, v)
+    U = U.flatten()[:N]
+    V = V.flatten()[:N]
+    x = (1 + (V / 2) * np.cos(U / 2)) * np.cos(U)
+    y = (1 + (V / 2) * np.cos(U / 2)) * np.sin(U)
+    z = (V / 2) * np.sin(U / 2)
+    return np.stack([x, y, z], axis=1)
+
+
+def swiss_roll(N: int, noise: float = 0.0) -> np.ndarray:
+    """Standard swiss roll sampling in R^3."""
+    rng = np.random.default_rng(12345)
+    t = (3 * np.pi / 2) * (1 + 2 * rng.random(N))  # angle
+    x = t * np.cos(t)
+    y = 21 * rng.random(N)                          # height
+    z = t * np.sin(t)
+    X = np.stack([x, y, z], axis=1)
+    if noise > 0.0:
+        X += noise * rng.normal(size=X.shape)
+    return X
+
+
 def build_knn_graph_euclidean(X: np.ndarray, k: int = 16):
     """
     Symmetric kNN with Gaussian weights on Euclidean distances.
@@ -485,7 +526,9 @@ def train_model_node_pairs_by_start(
         use_continuous_only=use_continuous_only,
     )
     opt = torch.optim.Adam(model.parameters(), lr=lr)
+    # opt = torch.optim.SGD(model.parameters(), lr=lr)
     loss_fn = RelativeErrorLoss(eps=1e-1)
+    # loss_fn = nn.MSELoss()
 
     def eval_loader(dl: DataLoader) -> float:
         model.eval()
@@ -949,3 +992,52 @@ class Sphere(Ellipsoid):
             t=t,
             L_max=L_max,
         )
+    
+
+class Torus(Manifold):
+    """
+    Standard torus embedded in R^3 with major radius R and minor radius r.
+
+    Discretization is obtained by uniform grid sampling in (θ, φ).
+    Geodesics default to graph geodesics on the kNN graph.
+    """
+    def __init__(self, cfg: ManifoldConfig, R: float = 2.0, r: float = 1.0):
+        super().__init__(cfg)
+        self.R = float(R)
+        self.r = float(r)
+
+    def discretization(self) -> np.ndarray:
+        return torus_grid(self.cfg.N, self.R, self.r)
+    # geodesics: use base implementation (graph geodesics)
+
+
+class SwissRoll(Manifold):
+    """
+    Swiss roll manifold embedded in R^3.
+
+    Discretization is obtained by standard swiss roll sampling.
+    Geodesics default to graph geodesics on the kNN graph.
+    """
+    def __init__(self, cfg: ManifoldConfig, noise: float = 0.0):
+        super().__init__(cfg)
+        self.noise = float(noise)
+
+    def discretization(self) -> np.ndarray:
+        return swiss_roll(self.cfg.N, noise=self.noise)
+    # geodesics: use base implementation (graph geodesics)
+
+
+class MobiusStrip(Manifold):
+    """
+    Möbius strip embedded in R^3.
+
+    Discretization is obtained by uniform grid sampling in (u, v).
+    Geodesics default to graph geodesics on the kNN graph.
+    """
+    def __init__(self, cfg: ManifoldConfig, width: float = 1.0):
+        super().__init__(cfg)
+        self.width = float(width)
+
+    def discretization(self) -> np.ndarray:
+        return mobius_strip_grid(self.cfg.N, self.width)
+    # geodesics: use base implementation (graph geodesics)
