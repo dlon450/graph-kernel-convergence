@@ -22,7 +22,7 @@ else:
     # M.make_dataset()
 # model, hist, splits = M.train_model()
 # M.save_pickle("saved/sphere_manifold_MSE.pkl")
-K_nn, K_true, G_nn, mse, rel = M.compute_ground_truth(L_max=100, t=0.025)
+K_nn, K_true, G_nn, mse, rel = M.compute_ground_truth(L_max=50, t=0.025)
 
 # # Collect validation predictions
 # y_true_va, y_pred_va = M.collect_val_predictions()

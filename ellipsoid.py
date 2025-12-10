@@ -1,4 +1,4 @@
-from manifolds import ManifoldConfig, Sphere, Ellipsoid
+from manifolds import ManifoldConfig, Ellipsoid
 from plots import (
     plot_dynamics,
     plot_pred_vs_actual,
@@ -19,40 +19,43 @@ if os.path.exists(filepath):
     model, hist, splits = M.model, M.history, M.splits
 else:
     M.build_signature_walks()
-    M.make_dataset(truncate=False)
-# M.save_pickle(filepath)
-# model, hist, splits = M.train_model()
-# M.cfg.epochs = 100
-# M.save_pickle("saved/ellipsoid_manifold_SGD.pkl")
-# K_nn, K_true, G_nn, mse, rel = M.compute_ground_truth(L_max=30, t=0.025)
+    M.make_dataset()
+    model, hist, splits = M.train_model()
+    M.save_pickle(filepath)
 
-# Collect validation predictions
-y_true_va, y_pred_va = M.collect_val_predictions()
-plot_dynamics(hist, title="Ellipsoid: RMSE", rmse=True)
-plot_dynamics(hist, title="Ellipsoid: Relative error", rmse=False)
-plot_pred_vs_actual(y_true_va, y_pred_va)
-plot_error_vs_truth(y_true_va, y_pred_va, error_type="relative")
-plot_error_vs_truth(y_true_va, y_pred_va, error_type="squared")
+# # Collect validation predictions
+# y_true_va, y_pred_va = M.collect_val_predictions()
+# plot_dynamics(hist, title="Ellipsoid: RMSE", rmse=True)
+# plot_dynamics(hist, title="Ellipsoid: Relative error", rmse=False)
+# plot_pred_vs_actual(y_true_va, y_pred_va)
+# plot_error_vs_truth(y_true_va, y_pred_va, error_type="relative")
+# plot_error_vs_truth(y_true_va, y_pred_va, error_type="squared")
 
-# f(x, ω) on the manifold for a few validation starts
-visualize_several_validation_starts(
-    model,
-    M.X,                 # N x 3
-    M.start_indices,     # num_starts
-    M.phi,               # num_starts x N
-    val_start_ids=splits["val_starts"],
-    how_many=3,
-    geod_rows=None,      # we recompute geodesic via dot product on S²
-    title_prefix="Ellipsoid | val",
-)
+# # f(x, ω) on the manifold for a few validation starts
+# geod_matrix = M._geodesic_matrix_for_training()
+# geod_rows = {
+#     int(s): geod_matrix[int(s)]             # row j corresponds to start_indices[j] == s
+#     for s in M.start_indices
+# }
+# visualize_several_validation_starts(
+#     model,
+#     M.X,                 # N x 3
+#     M.start_indices,     # num_starts
+#     M.phi,               # num_starts x N
+#     val_start_ids=splits["val_starts"],
+#     how_many=3,
+#     geod_rows=geod_rows,     
+#     title_prefix="Ellipsoid | val",
+# )
 
 # Kernel row plots (NN vs ground truth heat kernel)
-# example_start = int(splits["val_starts"][0])
-# plot_kernel_row_for_start(
-#     M.X,
-#     K_true / K_true.max(),
-#     K_nn / K_nn.max(),
-#     start_idx=example_start,
-#     title_prefix="Heat kernel",
-# )
+K_nn, K_true, G_nn, mse, rel = M.compute_ground_truth()
+example_start = int(splits["val_starts"][0])
+plot_kernel_row_for_start(
+    M.X,
+    K_true,
+    K_nn,
+    start_idx=example_start,
+    title_prefix="Heat kernel",
+)
 

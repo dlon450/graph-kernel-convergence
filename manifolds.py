@@ -678,7 +678,7 @@ def geodesic_matrix_graph(X: np.ndarray, neighbors: List[np.ndarray], sources: n
     """Compute geodesic distances (rows only for given sources) via Dijkstra on kNN graph."""
     N = X.shape[0]
     G = np.zeros((len(sources), N), dtype=float)
-    for i, s in enumerate(sources):
+    for i, s in tqdm(enumerate(sources), total=len(sources), desc="Computing graph geodesics"):
         G[i] = dijkstra_single_source(X, neighbors, int(s))
     return G
 
@@ -748,19 +748,127 @@ def compute_nn_kernel_and_errors(
     Returns (K_nn_all, K_true, G_nn, mse, abs_rel_err).
     """
     G_nn = compute_nn_feature_matrix_on_sphere(model, X)     # (N, N)
-    # G_nn /= np.max(G_nn, axis=1)[:, np.newaxis]
-    K_nn_all = G_nn @ G_nn.T                                 # (N, N)
+    K_nn = G_nn @ G_nn.T                                     # (N, N)
 
     K_true = ground_truth_heat_kernel(X, t=t, L_max=L_max)   # (N, N)
 
-    diff = K_nn_all - K_true
-    mse = float(np.mean(diff ** 2))
-    abs_rel_err = float(np.mean(np.abs(diff) / (np.abs(K_true) + eps)))
+    # --- Frobenius-norm scaling: match "energy" of K_nn to K_true ---
+    fro_true = np.linalg.norm(K_true, ord="fro")
+    fro_nn   = np.linalg.norm(K_nn,   ord="fro")
 
-    print(f"[Kernel NN vs GT] MSE          = {mse:.6e}")
-    print(f"[Kernel NN vs GT] Abs. rel err = {abs_rel_err:.6e}")
+    if fro_nn > 0:
+        scale = fro_true / fro_nn
+        K_nn_scaled = K_nn * scale
+    else:
+        scale = 1.0
+        K_nn_scaled = K_nn  # degenerate case; shouldn't really happen
 
-    return K_nn_all, K_true, G_nn, mse, abs_rel_err
+    print(f"[Sphere] Frobenius norms: "
+        f"||K_true||_F={fro_true:.6e}, ||K_nn||_F={fro_nn:.6e}, "
+        f"scale={scale:.6e}")
+
+    # use the *scaled* kernel from here on
+    diff = K_nn_scaled - K_true
+    mse = float(np.mean(diff**2))
+    abs_rel = float(np.mean(np.abs(diff) / (np.abs(K_true) + eps)))
+
+    print(f"[Sphere] raw MSE (Frob‑scaled)    = {mse:.6e}")
+    print(f"[Sphere] raw absRel (Frob‑scaled) = {abs_rel:.6e}")
+
+    return K_nn_scaled, K_true, G_nn, mse, abs_rel
+
+
+# ============================================================
+# Helpers for ellipsoid heat kernel & NN kernel
+# ============================================================
+
+def heat_kernel_from_graph_dense(
+    W: np.ndarray,
+    t: float,
+    normalized: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Construct a graph Laplacian from a dense adjacency W and compute
+    the heat kernel e^{-t L} via full eigen-decomposition.
+
+    W: (N,N) dense adjacency
+    t: diffusion time
+    normalized:
+      True  -> L_sym = I - D^{-1/2} W D^{-1/2}
+      False -> L = D - W
+
+    Returns:
+      K_t : (N,N) dense heat kernel
+      w   : eigenvalues
+      V   : eigenvectors (columns)
+    """
+    N = W.shape[0]
+    deg = W.sum(axis=1)
+    if normalized:
+        d_inv_sqrt = np.power(deg + 1e-12, -0.5)
+        Wn = (d_inv_sqrt[:, None] * W) * d_inv_sqrt[None, :]
+        L = np.eye(N) - Wn
+    else:
+        L = np.diag(deg) - W
+
+    w, V = np.linalg.eigh(L)
+    expw = np.exp(-t * w)
+    K_t = (V * expw) @ V.T
+    return K_t, w, V
+
+
+def compute_nn_feature_matrix_on_manifold(
+    model: nn.Module,
+    X: np.ndarray,
+    geod_matrix: np.ndarray,
+) -> np.ndarray:
+    """
+    General version of compute_nn_feature_matrix_on_sphere:
+
+    Uses a precomputed geodesic matrix geod_matrix[i,j] = d(x_i, x_j),
+    matching the feature used in training on the manifold.
+
+    Returns:
+      G[i, j] ≈ φ_t(x_i)[ω_j].
+    """
+    N = X.shape[0]
+    device = next(model.parameters()).device
+
+    omega_xyz = torch.tensor(X, dtype=torch.float32, device=device)  # (N,3)
+    omega_ids = torch.arange(N, dtype=torch.long, device=device)     # (N,)
+
+    G = np.zeros((N, N), dtype=np.float32)
+
+    model.eval()
+    with torch.no_grad():
+        for s in tqdm(range(N), desc="NN prediction on manifold"):
+            start_xyz = X[s]
+            geod_row = geod_matrix[s].astype(np.float32)  # (N,)
+
+            batch = {
+                "start": torch.full((N,), s, dtype=torch.long, device=device),
+                "omega": omega_ids,
+                "start_xyz": torch.tensor(
+                    np.repeat(start_xyz[None, :], N, axis=0),
+                    dtype=torch.float32,
+                    device=device,
+                ),
+                "omega_xyz": omega_xyz,
+                "geod": torch.tensor(geod_row[:, None], dtype=torch.float32, device=device),
+            }
+            G[s] = model(batch).detach().cpu().numpy()
+
+    return G
+
+
+def frobenius_mse(A: np.ndarray, B: np.ndarray) -> float:
+    return float(np.mean((A - B) ** 2))
+
+
+def frobenius_rel_error(A: np.ndarray, B: np.ndarray) -> float:
+    num = np.linalg.norm(A - B, ord="fro")
+    den = np.linalg.norm(B, ord="fro") + 1e-16
+    return float(num / den)
 
 
 # ============================================================
@@ -957,7 +1065,77 @@ class Ellipsoid(Manifold):
 
     def discretization(self) -> np.ndarray:
         return fibonacci_sphere_scaled(self.cfg.N, self.a, self.b, self.c)
-    # geodesics: use base implementation (graph geodesics)
+
+    def compute_ground_truth(
+        self,
+        k_lap: Optional[int] = None,
+        normalized_lap: bool = True,
+        eps: float = 1e-3,
+        t: float = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
+        """
+        Approximate 'ground-truth' diffusion heat kernel on the ellipsoid via
+        the graph Laplacian and compare it against the NN-induced kernel.
+
+        Returns:
+        K_nn    : (N,N) NN-based kernel (rescaled to best match K_true)
+        K_true  : (N,N) Laplacian heat kernel
+        G_nn    : (N,N) *rescaled* NN feature matrix
+        mse     : MSE(K_nn, K_true)
+        abs_rel : mean_{i,j} |K_nn - K_true| / (|K_true| + eps)
+        """
+        if self.model is None or self.X is None:
+            raise RuntimeError("Need trained model and discretization before computing ground truth.")
+        if t is None:
+            t = self.cfg.t
+
+        N = self.X.shape[0]
+
+        # 1) Full graph geodesics for **all** nodes
+        #    (base helper only fills rows for start_indices)
+        all_sources = np.arange(N, dtype=int)
+        geod_matrix_full = geodesic_matrix_graph(self.X, self.neighbors, all_sources)
+
+        # 2) NN feature matrix G_nn[i, j] ≈ g(x_i, ω_j)
+        G_nn = compute_nn_feature_matrix_on_manifold(self.model, self.X, geod_matrix_full)
+
+        # 3) Build graph adjacency W on ellipsoid for Laplacian
+        if k_lap is None:
+            k_lap = self.cfg.k
+        W_raw, _, _, _, _ = build_knn_graph_euclidean(self.X, k=k_lap)
+
+        # 4) Spectral heat kernel from dense Laplacian
+        K_true, w, V = heat_kernel_from_graph_dense(
+            W_raw,
+            t=t,
+            normalized=normalized_lap,
+        )
+
+        # 5) Rescale NN feature matrix so that K_nn best matches K_true
+        #    in Frobenius norm:  min_α || α G G^T - K_true ||_F^2
+        K_nn_raw = G_nn @ G_nn.T
+
+        num = float(np.sum(K_true * K_nn_raw))
+        den = float(np.sum(K_nn_raw * K_nn_raw) + 1e-16)
+        alpha = max(num / den, 0.0)          # optimal scalar on K_nn_raw
+        beta = np.sqrt(alpha)                # scalar on G_nn
+
+        G_nn_scaled = G_nn * beta
+        K_nn = G_nn_scaled @ G_nn_scaled.T
+
+        print(f"[Ellipsoid] kernel rescale alpha={alpha:.3e}, beta={beta:.3e}")
+        print(f"[Ellipsoid] diag(K_true) in [{K_true.diagonal().min():.3e}, {K_true.diagonal().max():.3e}]")
+        print(f"[Ellipsoid] diag(K_nn)   in [{K_nn.diagonal().min():.3e}, {K_nn.diagonal().max():.3e}]")
+
+        # 6) Errors
+        diff = K_nn - K_true
+        mse = float(np.mean(diff ** 2))
+        abs_rel = float(np.mean(np.abs(diff) / (np.abs(K_true) + eps)))
+
+        print(f"[Ellipsoid] MSE(K_nn, K_true)    = {mse:.6e}")
+        print(f"[Ellipsoid] mean abs rel. error = {abs_rel:.6e}")
+
+        return K_nn, K_true, G_nn_scaled, mse, abs_rel
 
 
 class Sphere(Ellipsoid):
