@@ -752,20 +752,28 @@ def compute_nn_kernel_and_errors(
 
     K_true = ground_truth_heat_kernel(X, t=t, L_max=L_max)   # (N, N)
 
-    # --- Frobenius-norm scaling: match "energy" of K_nn to K_true ---
-    fro_true = np.linalg.norm(K_true, ord="fro")
-    fro_nn   = np.linalg.norm(K_nn,   ord="fro")
+    # # --- Frobenius-norm scaling: match "energy" of K_nn to K_true ---
+    # fro_true = np.linalg.norm(K_true, ord="fro")
+    # fro_nn   = np.linalg.norm(K_nn,   ord="fro")
 
-    if fro_nn > 0:
-        scale = fro_true / fro_nn
-        K_nn_scaled = K_nn * scale
-    else:
-        scale = 1.0
-        K_nn_scaled = K_nn  # degenerate case; shouldn't really happen
+    # if fro_nn > 0:
+    #     scale = fro_true / fro_nn
+    #     K_nn_scaled = K_nn * scale
+    # else:
+    #     scale = 1.0
+    #     K_nn_scaled = K_nn  # degenerate case; shouldn't really happen
 
-    print(f"[Sphere] Frobenius norms: "
-        f"||K_true||_F={fro_true:.6e}, ||K_nn||_F={fro_nn:.6e}, "
-        f"scale={scale:.6e}")
+    # print(f"[Sphere] Frobenius norms: "
+    #     f"||K_true||_F={fro_true:.6e}, ||K_nn||_F={fro_nn:.6e}, "
+    #     f"scale={scale:.6e}")
+
+    num = float(np.sum(K_true * K_nn))
+    den = float(np.sum(K_nn * K_nn) + 1e-16)
+    alpha = max(num / den, 0.0)          # optimal scalar on K_nn_raw
+    beta = np.sqrt(alpha)                # scalar on G_nn
+
+    G_nn_scaled = G_nn * beta
+    K_nn_scaled = G_nn_scaled @ G_nn_scaled.T
 
     # use the *scaled* kernel from here on
     diff = K_nn_scaled - K_true
@@ -896,6 +904,8 @@ class Manifold:
         self.model: Optional[nn.Module] = None
         self.history: Optional[Dict[str, List[float]]] = None
         self.splits: Optional[Dict[str, Any]] = None
+        self.geod_matrix_full = None
+        self.geod_matrix_training = None
 
     # ---- core steps -----------------------------------------------------
 
@@ -1014,12 +1024,14 @@ class Manifold:
         if self.sup is None or self.model is None or self.splits is None:
             raise RuntimeError("Need dataset, trained model, and splits before collecting val predictions.")
 
-        geod_matrix = self._geodesic_matrix_for_training()
+        if self.geod_matrix_training is None:
+            geod_matrix = self._geodesic_matrix_for_training()
+            self.geod_matrix_training = geod_matrix
 
         y_true, y_pred = collect_val_predictions(
             model=self.model,
             sup=self.sup,
-            geod_matrix=geod_matrix,
+            geod_matrix=self.geod_matrix_training,
             val_starts=self.splits["val_starts"],
             batch_size=self.cfg.batch_size,
             use_continuous_only=self.cfg.use_continuous_only,
@@ -1094,10 +1106,12 @@ class Ellipsoid(Manifold):
         # 1) Full graph geodesics for **all** nodes
         #    (base helper only fills rows for start_indices)
         all_sources = np.arange(N, dtype=int)
-        geod_matrix_full = geodesic_matrix_graph(self.X, self.neighbors, all_sources)
+        if self.geod_matrix_full is None:
+            geod_matrix_full = geodesic_matrix_graph(self.X, self.neighbors, all_sources)
+            self.geod_matrix_full = geod_matrix_full
 
         # 2) NN feature matrix G_nn[i, j] ≈ g(x_i, ω_j)
-        G_nn = compute_nn_feature_matrix_on_manifold(self.model, self.X, geod_matrix_full)
+        G_nn = compute_nn_feature_matrix_on_manifold(self.model, self.X, self.geod_matrix_full)
 
         # 3) Build graph adjacency W on ellipsoid for Laplacian
         if k_lap is None:
@@ -1218,4 +1232,76 @@ class MobiusStrip(Manifold):
 
     def discretization(self) -> np.ndarray:
         return mobius_strip_grid(self.cfg.N, self.width)
-    # geodesics: use base implementation (graph geodesics)
+    
+    def compute_ground_truth(
+        self,
+        k_lap: Optional[int] = None,
+        normalized_lap: bool = True,
+        eps: float = 1e-3,
+        t: float = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
+        """
+        Approximate 'ground-truth' diffusion heat kernel on the ellipsoid via
+        the graph Laplacian and compare it against the NN-induced kernel.
+
+        Returns:
+        K_nn    : (N,N) NN-based kernel (rescaled to best match K_true)
+        K_true  : (N,N) Laplacian heat kernel
+        G_nn    : (N,N) *rescaled* NN feature matrix
+        mse     : MSE(K_nn, K_true)
+        abs_rel : mean_{i,j} |K_nn - K_true| / (|K_true| + eps)
+        """
+        if self.model is None or self.X is None:
+            raise RuntimeError("Need trained model and discretization before computing ground truth.")
+        if t is None:
+            t = self.cfg.t
+
+        N = self.X.shape[0]
+
+        # 1) Full graph geodesics for **all** nodes
+        #    (base helper only fills rows for start_indices)
+        all_sources = np.arange(N, dtype=int)
+        if self.geod_matrix_full is None:
+            geod_matrix_full = geodesic_matrix_graph(self.X, self.neighbors, all_sources)
+            self.geod_matrix_full = geod_matrix_full
+
+        # 2) NN feature matrix G_nn[i, j] ≈ g(x_i, ω_j)
+        G_nn = compute_nn_feature_matrix_on_manifold(self.model, self.X, self.geod_matrix_full)
+
+        # 3) Build graph adjacency W on ellipsoid for Laplacian
+        if k_lap is None:
+            k_lap = self.cfg.k
+        W_raw, _, _, _, _ = build_knn_graph_euclidean(self.X, k=k_lap)
+
+        # 4) Spectral heat kernel from dense Laplacian
+        K_true, w, V = heat_kernel_from_graph_dense(
+            W_raw,
+            t=t,
+            normalized=normalized_lap,
+        )
+
+        # 5) Rescale NN feature matrix so that K_nn best matches K_true
+        #    in Frobenius norm:  min_α || α G G^T - K_true ||_F^2
+        K_nn_raw = G_nn @ G_nn.T
+
+        num = float(np.sum(K_true * K_nn_raw))
+        den = float(np.sum(K_nn_raw * K_nn_raw) + 1e-16)
+        alpha = max(num / den, 0.0)          # optimal scalar on K_nn_raw
+        beta = np.sqrt(alpha)                # scalar on G_nn
+
+        G_nn_scaled = G_nn * beta
+        K_nn = G_nn_scaled @ G_nn_scaled.T
+
+        print(f"[Mobius] kernel rescale alpha={alpha:.3e}, beta={beta:.3e}")
+        print(f"[Mobius] diag(K_true) in [{K_true.diagonal().min():.3e}, {K_true.diagonal().max():.3e}]")
+        print(f"[Mobius] diag(K_nn)   in [{K_nn.diagonal().min():.3e}, {K_nn.diagonal().max():.3e}]")
+
+        # 6) Errors
+        diff = K_nn - K_true
+        mse = float(np.mean(diff ** 2))
+        abs_rel = float(np.mean(np.abs(diff) / (np.abs(K_true) + eps)))
+
+        print(f"[Mobius] MSE(K_nn, K_true)    = {mse:.6e}")
+        print(f"[Mobius] mean abs rel. error = {abs_rel:.6e}")
+
+        return K_nn, K_true, G_nn_scaled, mse, abs_rel

@@ -1,5 +1,4 @@
 from typing import Dict, Any, Iterable, Optional
-
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -69,6 +68,19 @@ def apply_data_aspect(ax: plt.Axes, X: np.ndarray) -> None:
 # ---------------------------------------------------------------------
 # 3) f(x, ω) field on the manifold for a single start node
 # ---------------------------------------------------------------------
+def _view_from_point(p: np.ndarray):
+    """
+    Return (elev, azim) so that the camera is placed along direction p
+    (looking toward the origin). Works well when your points live on/near
+    a sphere centered at 0.
+    """
+    p = np.asarray(p, dtype=float).reshape(3,)
+    r = float(np.linalg.norm(p) + 1e-12)
+    x, y, z = p / r
+    azim = np.degrees(np.arctan2(y, x))
+    elev = np.degrees(np.arcsin(np.clip(z, -1.0, 1.0)))
+    return elev, azim
+
 
 def plot_fx_field_for_start(
     model: torch.nn.Module,
@@ -82,39 +94,26 @@ def plot_fx_field_for_start(
     cmap_main: str = "OrRd",
     cmap_err: str = "coolwarm",
 ) -> None:
-    """
-    Visualize predicted vs ground-truth φ_t(x_j)[ω] for a single start node.
-
-    Assumes your model takes a batch dict with keys:
-        'start', 'omega', 'start_xyz', 'omega_xyz', 'geod'
-    and returns f(x, ω) with shape (batch_size,) or (batch_size, 1).
-    """
     model.eval()
     device = next(model.parameters()).device
     X = np.asarray(X, dtype=float)
     N = X.shape[0]
 
-    # Convert "which start" from index into start_indices to the actual node id
     s = int(start_indices[s_idx])
     start_xyz = X[s]
     omega_xyz = X
 
-    # If no precomputed geodesics are provided, assume S^2 and compute via arccos of dot products.
     if geod_vec is None:
         dots = np.clip((omega_xyz * start_xyz).sum(axis=1), -1.0, 1.0)
         geod = np.arccos(dots)
     else:
         geod = np.asarray(geod_vec, dtype=np.float32)
 
-    # Build batch for all ω in the discretization
     batch = {
         "start": torch.full((N,), s, dtype=torch.long, device=device),
         "omega": torch.arange(N, dtype=torch.long, device=device),
-        "start_xyz": torch.tensor(
-            np.repeat(start_xyz[None, :], N, axis=0),
-            dtype=torch.float32,
-            device=device,
-        ),
+        "start_xyz": torch.tensor(np.repeat(start_xyz[None, :], N, axis=0),
+                                  dtype=torch.float32, device=device),
         "omega_xyz": torch.tensor(omega_xyz, dtype=torch.float32, device=device),
         "geod": torch.tensor(geod[:, None], dtype=torch.float32, device=device),
     }
@@ -122,11 +121,9 @@ def plot_fx_field_for_start(
     with torch.no_grad():
         f_pred = model(batch).detach().cpu().numpy().reshape(-1)
 
-    # Ground truth row for this start
     j = int(np.where(start_indices == s)[0][0])
     phi_row = np.asarray(phi[j], dtype=float).reshape(-1)
 
-    # Shared or independent normalization for colormaps
     if share_norm:
         vmin = float(min(f_pred.min(), phi_row.min()))
         vmax = float(max(f_pred.max(), phi_row.max()))
@@ -138,61 +135,58 @@ def plot_fx_field_for_start(
         norm_main = Normalize(vmin=0.0, vmax=1.0)
 
     err = f_pred - phi_row
-    norm_err = TwoSlopeNorm(
-        vmin=float(err.min()),
-        vcenter=0.0,
-        vmax=float(err.max()),
-    )
+    norm_err = TwoSlopeNorm(vmin=float(err.min()), vcenter=0.0, vmax=float(err.max()))
 
-    # ---- PRED ----
-    fig1 = plt.figure()
-    ax1 = fig1.add_subplot(111, projection="3d")
-    ax1.scatter(X[:, 0], X[:, 1], X[:, 2], s=18, c=f_vis, cmap=cmap_main, norm=norm_main)
+    elev, azim = _view_from_point(start_xyz)
+
+    fig = plt.figure(figsize=(15.5, 5.2), constrained_layout=True)
+    ax1 = fig.add_subplot(1, 3, 1, projection="3d")
+    ax2 = fig.add_subplot(1, 3, 2, projection="3d")
+    ax3 = fig.add_subplot(1, 3, 3, projection="3d")
+
+    # --- PRED ---
+    sc1 = ax1.scatter(X[:, 0], X[:, 1], X[:, 2], s=18, c=f_vis, cmap=cmap_main, norm=norm_main)
+    # ax1.scatter(start_xyz[0], start_xyz[1], start_xyz[2], s=120, c="k", marker="*", depthshade=False)
     ax1.set_title(f"{title_prefix} Prediction f(x, ·)")
     ax1.set_xticks([]); ax1.set_yticks([]); ax1.set_zticks([])
     apply_data_aspect(ax1, X)
-    cbar1 = fig1.colorbar(
-        ScalarMappable(norm=norm_main, cmap=cmap_main),
-        ax=ax1,
-        shrink=0.8,
-    )
-    cbar1.set_label(
-        "f(x, ω)" + (" (shared scale)" if share_norm else " (individually normalized)")
-    )
-    plt.show()
+    ax1.view_init(elev=elev, azim=azim)
 
-    # ---- TRUTH ----
-    fig2 = plt.figure()
-    ax2 = fig2.add_subplot(111, projection="3d")
-    ax2.scatter(X[:, 0], X[:, 1], X[:, 2], s=18, c=g_vis, cmap=cmap_main, norm=norm_main)
+    # --- TRUTH ---
+    sc2 = ax2.scatter(X[:, 0], X[:, 1], X[:, 2], s=18, c=g_vis, cmap=cmap_main, norm=norm_main)
+    # ax2.scatter(start_xyz[0], start_xyz[1], start_xyz[2], s=120, c="k", marker="*", depthshade=False)
     ax2.set_title(f"{title_prefix} Ground truth φ_t(x)[·]")
     ax2.set_xticks([]); ax2.set_yticks([]); ax2.set_zticks([])
     apply_data_aspect(ax2, X)
-    cbar2 = fig2.colorbar(
-        ScalarMappable(norm=norm_main, cmap=cmap_main),
-        ax=ax2,
-        shrink=0.8,
-    )
-    cbar2.set_label(
-        "φ_t(x, ω)" + (" (shared scale)" if share_norm else " (individually normalized)")
-    )
-    plt.show()
+    ax2.view_init(elev=elev, azim=azim)
 
-    # ---- ERROR ----
-    fig3 = plt.figure()
-    ax3 = fig3.add_subplot(111, projection="3d")
-    ax3.scatter(X[:, 0], X[:, 1], X[:, 2], s=18, c=err, cmap=cmap_err, norm=norm_err)
+    # --- ERROR ---
+    sc3 = ax3.scatter(X[:, 0], X[:, 1], X[:, 2], s=18, c=err, cmap=cmap_err, norm=norm_err)
+    # ax3.scatter(start_xyz[0], start_xyz[1], start_xyz[2], s=120, c="k", marker="*", depthshade=False)
     ax3.set_title(f"{title_prefix} Error: f(x, ·) − φ_t(x)[·]")
     ax3.set_xticks([]); ax3.set_yticks([]); ax3.set_zticks([])
     apply_data_aspect(ax3, X)
-    cbar3 = fig3.colorbar(
+    ax3.view_init(elev=elev, azim=azim)
+
+    # Shared colorbar for pred+truth
+    cbar_main = fig.colorbar(
+        ScalarMappable(norm=norm_main, cmap=cmap_main),
+        ax=[ax1, ax2],
+        shrink=0.85,
+        pad=0.02,
+    )
+    cbar_main.set_label("value" + (" (shared scale)" if share_norm else " (individually normalized)"))
+
+    # Colorbar for error
+    cbar_err = fig.colorbar(
         ScalarMappable(norm=norm_err, cmap=cmap_err),
         ax=ax3,
-        shrink=0.8,
+        shrink=0.85,
+        pad=0.02,
     )
-    cbar3.set_label("Prediction − Truth")
-    plt.show()
+    cbar_err.set_label("Prediction − Truth")
 
+    plt.show()
 
 def visualize_several_validation_starts(
     model: torch.nn.Module,
@@ -329,13 +323,14 @@ def plot_kernel_row_for_start(
     K_nn_all: np.ndarray,   # (N, N)
     start_idx: int,
     title_prefix: str = "Kernel",
+    cmap_main: str = "OrRd",
+    cmap_err: str = "coolwarm",
+    savepath: Optional[str] = None,
 ) -> None:
     """
-    Visualize a single kernel row K(x, ·):
-      - NN kernel row vs ground truth
-      - error (NN − GT)
-
-    start_idx is the index of x in the full grid X (0..N-1).
+    Single figure (1x3):
+      [ NN row | GT row | Error ]
+    Camera is rotated to face the start node x_i (uses _view_from_point).
     """
     X = np.asarray(X, dtype=float)
     K_true = np.asarray(K_true, dtype=float)
@@ -346,62 +341,65 @@ def plot_kernel_row_for_start(
     if not (0 <= i < N):
         raise ValueError(f"start_idx={i} out of range 0..{N-1}")
 
-    gt_row = K_true[i]       # (N,)
-    nn_row = K_nn_all[i]     # (N,)
+    start_xyz = X[i]
 
-    # Shared normalization for NN vs GT
+    gt_row = K_true[i].reshape(-1)      # (N,)
+    nn_row = K_nn_all[i].reshape(-1)    # (N,)
+
     vmin = float(min(gt_row.min(), nn_row.min()))
     vmax = float(max(gt_row.max(), nn_row.max()))
     norm_main = Normalize(vmin=vmin, vmax=vmax)
 
     err = nn_row - gt_row
-    norm_err = TwoSlopeNorm(
-        vmin=float(min(err.min(), -err.max())),
-        vcenter=0.0,
-        vmax=float(max(err.max(), -err.min())),
-    )
+    m = float(max(abs(err.min()), abs(err.max())))
+    norm_err = TwoSlopeNorm(vmin=-m, vcenter=0.0, vmax=m)
 
-    # ---- NN kernel row ----
-    fig1 = plt.figure()
-    ax1 = fig1.add_subplot(111, projection="3d")
-    ax1.scatter(X[:, 0], X[:, 1], X[:, 2], s=18, c=nn_row, cmap="OrRd", norm=norm_main)
+    elev, azim = _view_from_point(start_xyz)
+
+    fig = plt.figure(figsize=(15.5, 5.2), constrained_layout=True)
+    ax1 = fig.add_subplot(1, 3, 1, projection="3d")
+    ax2 = fig.add_subplot(1, 3, 2, projection="3d")
+    ax3 = fig.add_subplot(1, 3, 3, projection="3d")
+
+    # --- NN ---
+    ax1.scatter(X[:, 0], X[:, 1], X[:, 2], s=18, c=nn_row, cmap=cmap_main, norm=norm_main)
     ax1.set_title(f"{title_prefix} NN K(x, ·), start={i}")
     ax1.set_xticks([]); ax1.set_yticks([]); ax1.set_zticks([])
     apply_data_aspect(ax1, X)
-    cbar1 = fig1.colorbar(
-        ScalarMappable(norm=norm_main, cmap="OrRd"),
-        ax=ax1,
-        shrink=0.8,
-    )
-    cbar1.set_label("K_nn(x, ·)")
-    plt.show()
+    ax1.view_init(elev=elev, azim=azim)
 
-    # ---- Ground-truth kernel row ----
-    fig2 = plt.figure()
-    ax2 = fig2.add_subplot(111, projection="3d")
-    ax2.scatter(X[:, 0], X[:, 1], X[:, 2], s=18, c=gt_row, cmap="OrRd", norm=norm_main)
+    # --- GT ---
+    ax2.scatter(X[:, 0], X[:, 1], X[:, 2], s=18, c=gt_row, cmap=cmap_main, norm=norm_main)
     ax2.set_title(f"{title_prefix} GT K(x, ·), start={i}")
     ax2.set_xticks([]); ax2.set_yticks([]); ax2.set_zticks([])
     apply_data_aspect(ax2, X)
-    cbar2 = fig2.colorbar(
-        ScalarMappable(norm=norm_main, cmap="OrRd"),
-        ax=ax2,
-        shrink=0.8,
-    )
-    cbar2.set_label("K_true(x, ·)")
-    plt.show()
+    ax2.view_init(elev=elev, azim=azim)
 
-    # ---- Error row ----
-    fig3 = plt.figure()
-    ax3 = fig3.add_subplot(111, projection="3d")
-    ax3.scatter(X[:, 0], X[:, 1], X[:, 2], s=18, c=err, cmap="coolwarm", norm=norm_err)
+    # --- ERR ---
+    ax3.scatter(X[:, 0], X[:, 1], X[:, 2], s=18, c=err, cmap=cmap_err, norm=norm_err)
     ax3.set_title(f"{title_prefix} Error K_nn(x, ·) − K_true(x, ·)")
     ax3.set_xticks([]); ax3.set_yticks([]); ax3.set_zticks([])
     apply_data_aspect(ax3, X)
-    cbar3 = fig3.colorbar(
-        ScalarMappable(norm=norm_err, cmap="coolwarm"),
-        ax=ax3,
-        shrink=0.8,
+    ax3.view_init(elev=elev, azim=azim)
+
+    # Shared colorbar for NN+GT
+    cbar_main = fig.colorbar(
+        ScalarMappable(norm=norm_main, cmap=cmap_main),
+        ax=[ax1, ax2],
+        shrink=0.85,
+        pad=0.02,
     )
-    cbar3.set_label("K_nn(x, ·) − K_true(x, ·)")
+    cbar_main.set_label("K(x, ·) (shared scale)")
+
+    # Error colorbar
+    cbar_err = fig.colorbar(
+        ScalarMappable(norm=norm_err, cmap=cmap_err),
+        ax=ax3,
+        shrink=0.85,
+        pad=0.02,
+    )
+    cbar_err.set_label("K_nn(x, ·) − K_true(x, ·)")
+
+    if savepath:
+        plt.savefig(savepath, bbox_inches="tight")
     plt.show()
